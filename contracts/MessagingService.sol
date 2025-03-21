@@ -18,6 +18,22 @@ interface IKOLRegistry {
         );
 }
 
+// Custom errors for gas optimization and better error handling
+error NotVerifiedKOL();
+error IncorrectFeeAmount();
+error MessageNotPending();
+error NotAuthorizedKOL();
+error MessageDeadlinePassed();
+error DeadlineNotReached();
+error PayoutToKOLFailed();
+error RefundTransferFailed();
+error NotFeeCollector();
+error FeeClaimTimelockActive();
+error NoFeesAvailable();
+error FeeTransferFailed();
+error InvalidKOLRegistryAddress();
+error InvalidFeeCollectorAddress();
+
 contract Messaging is ReentrancyGuard, Ownable {
     uint256 public constant MESSAGE_EXPIRATION = 7 days;
     uint256 public constant PLATFORM_FEE_PERCENT = 7;
@@ -69,8 +85,9 @@ contract Messaging is ReentrancyGuard, Ownable {
     event FeesClaimed(uint256 amount, uint256 timestamp);
 
     constructor(address _kolRegistry, address _feeCollector) Ownable(msg.sender) {
-        require(_kolRegistry != address(0), "Invalid KOLRegistry address");
-        require(_feeCollector != address(0), "Invalid feeCollector address");
+        if (_kolRegistry == address(0)) revert InvalidKOLRegistryAddress();
+        if (_feeCollector == address(0)) revert InvalidFeeCollectorAddress();
+        
         kolRegistry = IKOLRegistry(_kolRegistry);
         feeCollector = _feeCollector;
         lastFeeClaimTimestamp = block.timestamp;
@@ -108,8 +125,8 @@ contract Messaging is ReentrancyGuard, Ownable {
         nonReentrant
     {
         (, , , uint256 fee, , bool verified) = kolRegistry.kolProfiles(_kol);
-        require(verified, "Recipient is not a verified KOL");
-        require(msg.value == fee, "Incorrect fee amount sent");
+        if (!verified) revert NotVerifiedKOL();
+        if (msg.value != fee) revert IncorrectFeeAmount();
 
         messageCount += 1;
         uint256 deadline = block.timestamp + MESSAGE_EXPIRATION;
@@ -136,9 +153,9 @@ contract Messaging is ReentrancyGuard, Ownable {
         nonReentrant
     {
         Message storage msgObj = messages[_messageId];
-        require(msgObj.status == MessageStatus.Pending, "Message is not pending");
-        require(msg.sender == msgObj.kol, "Only the intended KOL can respond");
-        require(block.timestamp <= msgObj.deadline, "Deadline has passed");
+        if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
+        if (msg.sender != msgObj.kol) revert NotAuthorizedKOL();
+        if (block.timestamp > msgObj.deadline) revert MessageDeadlinePassed();
 
         (uint256 platformFee, uint256 netPayout) = _calculateRespondPayout(msgObj.fee);
 
@@ -147,15 +164,15 @@ contract Messaging is ReentrancyGuard, Ownable {
 
         accumulatedFees += platformFee;
         (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
-        require(payoutSent, "Payout to KOL failed");
+        if (!payoutSent) revert PayoutToKOLFailed();
 
         emit MessageResponded(_messageId, msg.sender, _responseIpfsHash);
     }
 
     function triggerTimeout(uint256 _messageId) public nonReentrant {
         Message storage msgObj = messages[_messageId];
-        require(msgObj.status == MessageStatus.Pending, "Message is not pending");
-        require(block.timestamp > msgObj.deadline, "Deadline not reached");
+        if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
+        if (block.timestamp <= msgObj.deadline) revert DeadlineNotReached();
 
         msgObj.status = MessageStatus.Expired;
         _removePendingMessage(_messageId);
@@ -163,11 +180,11 @@ contract Messaging is ReentrancyGuard, Ownable {
         (uint256 platformFee, uint256 netPayout, uint256 refundAmount) = _calculateTimeoutPayout(msgObj.fee);
 
         (bool refundSent, ) = msgObj.sender.call{value: refundAmount}("");
-        require(refundSent, "Refund transfer failed");
+        if (!refundSent) revert RefundTransferFailed();
 
         accumulatedFees += platformFee;
         (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
-        require(payoutSent, "Payout to KOL failed");
+        if (!payoutSent) revert PayoutToKOLFailed();
 
         emit MessageTimeoutTriggered(_messageId);
     }
@@ -208,16 +225,16 @@ contract Messaging is ReentrancyGuard, Ownable {
     }
 
     function claimFees() external nonReentrant {
-        require(msg.sender == feeCollector, "Only fee collector can claim fees");
-        require(block.timestamp >= lastFeeClaimTimestamp + feeClaimDelay, "Fee claim timelock active");
-        require(accumulatedFees > 0, "No fees available");
+        if (msg.sender != feeCollector) revert NotFeeCollector();
+        if (block.timestamp < lastFeeClaimTimestamp + feeClaimDelay) revert FeeClaimTimelockActive();
+        if (accumulatedFees == 0) revert NoFeesAvailable();
 
         uint256 amount = accumulatedFees;
         accumulatedFees = 0;
         lastFeeClaimTimestamp = block.timestamp;
 
         (bool sent, ) = feeCollector.call{value: amount}("");
-        require(sent, "Fee transfer failed");
+        if (!sent) revert FeeTransferFailed();
 
         emit FeesClaimed(amount, block.timestamp);
     }

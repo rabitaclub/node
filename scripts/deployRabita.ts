@@ -1,28 +1,27 @@
 import hre from "hardhat";
 import { writeFileSync } from "fs";
 import { resolve } from "path";
-import RabitaDeploymentModule from "../ignition/modules/RabitaDeployment";
 
 async function main() {
   console.log("Starting Rabita protocol deployment...");
 
-  const [deployer, verifier, feeCollector] = await hre.ethers.getSigners();
+  const [deployer] = await hre.ethers.getSigners();
+  const verifierAddress = process.env.VERIFIER_ADDRESS || deployer.address;
+  const feeCollectorAddress = process.env.FEE_COLLECTOR_ADDRESS || deployer.address;
+  
   console.log(`Deploying with account: ${deployer.address}`);
-  console.log(`Verifier account: ${verifier.address}`);
-  console.log(`Fee collector account: ${feeCollector.address}`);
+  console.log(`Verifier account: ${verifierAddress}`);
+  console.log(`Fee collector account: ${feeCollectorAddress}`);
 
   console.log("Deploying contracts using Ignition...");
-  const result = await hre.ignition.deploy(RabitaDeploymentModule, {
-    parameters: {
-      RabitaDeploymentModule: {
-        verifierAddress: verifier.address,
-        feeCollectorAddress: feeCollector.address
-      }
-    }
-  });
+  const RabitaApp = await hre.ethers.getContractFactory("RabitaRegistry")
+  const MessagingService = await hre.ethers.getContractFactory("Messaging")
 
-  const rabitaRegistryAddress = await result.rabitaRegistry.getAddress();
-  const messagingServiceAddress = await result.messagingService.getAddress();
+  const rabitaRegistry = await RabitaApp.deploy(verifierAddress);
+  const messagingService = await MessagingService.deploy(await rabitaRegistry.getAddress(), feeCollectorAddress);
+
+  const rabitaRegistryAddress = await rabitaRegistry.getAddress();
+  const messagingServiceAddress = await messagingService.getAddress();
 
   console.log(`RabitaRegistry deployed to: ${rabitaRegistryAddress}`);
   console.log(`MessagingService deployed to: ${messagingServiceAddress}`);
@@ -31,17 +30,20 @@ async function main() {
 # Rabita Protocol Deployed Contract Addresses
 RABITA_REGISTRY_ADDRESS=${rabitaRegistryAddress}
 MESSAGING_SERVICE_ADDRESS=${messagingServiceAddress}
-VERIFIER_ADDRESS=${verifier.address}
-FEE_COLLECTOR_ADDRESS=${feeCollector.address}
+VERIFIER_ADDRESS=${verifierAddress}
+FEE_COLLECTOR_ADDRESS=${feeCollectorAddress}
 
 # Configuration Options
-# Set to "true" to update the verifier during configuration
-UPDATE_VERIFIER=false
+# Set to "true" to add a new verifier
+ADD_VERIFIER=false
 NEW_VERIFIER_ADDRESS=
 
 # Set to "true" to register an initial KOL during configuration
 REGISTER_KOL=false
+# If not provided, uses a local test account
 KOL_ADDRESS=
+# Optional: Provide private key if KOL is not a local test account
+KOL_PRIVATE_KEY=
 KOL_PLATFORM=Twitter
 KOL_HANDLE=example_kol
 KOL_FEE=0.1

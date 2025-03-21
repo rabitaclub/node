@@ -5,7 +5,12 @@ import { config as dotenvConfig } from "dotenv";
 dotenvConfig();
 
 const config: HardhatUserConfig = {
-  solidity: "0.8.28",
+  solidity: {
+    version: "0.8.28",
+    settings: {
+      viaIR: true,
+    },
+  },
   networks: {
     bsc: {
       url: process.env.BSC_URL,
@@ -14,9 +19,10 @@ const config: HardhatUserConfig = {
     testnet: {
       url: process.env.TEST_URL,
       accounts: [process.env.TEST_KEY || ""],
+      gasPrice: 5_000_000_000,
     },
     hardhat: {}
-  },
+  }
 };
 
 export default config;

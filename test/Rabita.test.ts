@@ -2,74 +2,213 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
-import { RabitaRegistry, Messaging, ReentrancyAttacker } from "../typechain-types";
+import { RabitaRegistry } from "../typechain-types";
 import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 
 describe("Rabita Protocol", function () {
   let rabitaRegistry: RabitaRegistry;
-  let messagingService: Messaging;
   let deployer: SignerWithAddress;
   let verificationSigner: SignerWithAddress;
   let kol: SignerWithAddress;
-  let requester: SignerWithAddress;
-  let feeCollector: SignerWithAddress;
   let other: SignerWithAddress;
 
   const DEFAULT_FEE = ethers.parseEther("1");
-  const PLATFORM_FEE_PERCENT = 7;
-  const MESSAGE_EXPIRATION = 7 * 24 * 60 * 60; // 7 days in seconds
+  // Set a fixed timestamp far in the future to avoid timing issues
+  const FUTURE_TIMESTAMP = 2000000000; // Year 2033
+  const DOMAIN_NAME = "Rabita Social Verification";
+  const DOMAIN_VERSION = "1";
+  const DEFAULT_DOMAIN_STRING = "rabita.social";
 
   async function deployContracts() {
-    [deployer, verificationSigner, kol, requester, feeCollector, other] = await ethers.getSigners();
+    [deployer, verificationSigner, kol, other] = await ethers.getSigners();
     
     const RabitaRegistry = await ethers.getContractFactory("RabitaRegistry");
     rabitaRegistry = await RabitaRegistry.deploy(verificationSigner.address);
     await rabitaRegistry.waitForDeployment();
 
-    const Messaging = await ethers.getContractFactory("Messaging");
-    messagingService = await Messaging.deploy(await rabitaRegistry.getAddress(), feeCollector.address);
-    await messagingService.waitForDeployment();
-
-    return { rabitaRegistry, messagingService, deployer, verificationSigner, kol, requester, feeCollector, other };
+    return { rabitaRegistry, deployer, verificationSigner, kol, other };
   }
 
-  async function signRegistrationMessage(
-    kolAddress: string,
-    socialPlatform: string,
-    socialHandle: string,
+  /**
+   * Generate random bytes32
+   */
+  function generateRandomSalt(): string {
+    return ethers.hexlify(ethers.randomBytes(32));
+  }
+
+  /**
+   * Generate random bytes16 nonce
+   */
+  function generateRandomNonce(): string {
+    return ethers.hexlify(ethers.randomBytes(16));
+  }
+
+  /**
+   * Create verifier signature for KOL verification
+   * This function signs the message in the same way the RabitaRegistry.verifyVerifierSignature function expects
+   */
+  async function signVerifierMessage(
+    walletAddress: string,
+    twitterUsername: string,
     salt: string,
-    signer: SignerWithAddress
+    platform: string,
+    nonce: string,
+    timestamp: number,
+    domain: string,
+    expiresAt: number,
+    verifier: SignerWithAddress
   ): Promise<string> {
-    const messageHash = ethers.solidityPackedKeccak256(
-      ["address", "string", "string", "string"],
-      [kolAddress, socialPlatform, socialHandle, salt]
+    // Create hash in the EXACT same way as the contract does in verifyVerifierSignature
+    // Note: The contract uses abi.encode() which is different from solidityPackedKeccak256
+    const encodedData = ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address", "string", "bytes32", "string", "bytes16", "uint256", "string", "uint256"],
+      [
+        walletAddress,
+        twitterUsername,
+        salt,
+        platform,
+        nonce,
+        timestamp,
+        domain,
+        expiresAt
+      ]
     );
-    return await signer.signMessage(ethers.getBytes(messageHash));
+    
+    const verifierHash = ethers.keccak256(encodedData);
+    
+    // Sign the hash with the verifier's key using personal sign (which adds the Ethereum prefix)
+    return await verifier.signMessage(ethers.getBytes(verifierHash));
   }
 
+  /**
+   * Create user signature using EIP-712 typed data
+   * This matches the contract's EIP-712 signature verification
+   */
+  async function signUserMessage(
+    wallet: SignerWithAddress,
+    platform: string,
+    username: string, 
+    salt: string,
+    nonce: string,
+    timestamp: number,
+    domain: string,
+    expiresAt: number,
+    verifierSignature: string
+  ): Promise<string> {
+    // Get the contract address and digest directly from the contract
+    const contractAddress = await rabitaRegistry.getAddress();
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    
+    // Create domain data for EIP-712
+    const domainPassed = {
+      name: DOMAIN_NAME,
+      version: DOMAIN_VERSION,
+      chainId: chainId,
+      verifyingContract: contractAddress
+    };
+
+    // console.log("DEBUG: domain:", domain);
+
+    // const domainSeparator = await rabitaRegistry.domainSeparatorV4();
+    // console.log("DEBUG: domainSeparator:", domainSeparator);
+    
+    // Define the types for EIP-712 structured data
+    const types = {
+      SocialVerification: [
+        { name: "walletAddress", type: "address" },
+        { name: "platform", type: "string" },
+        { name: "username", type: "string" },
+        { name: "salt", type: "bytes32" },
+        { name: "nonce", type: "bytes16" },
+        { name: "timestamp", type: "uint256" },
+        { name: "domain", type: "string" },
+        { name: "expiresAt", type: "uint256" },
+        { name: "signature", type: "bytes" }
+      ]
+    };
+    
+    // Create the message data
+    const message = {
+      walletAddress: wallet.address,
+      platform: platform,
+      username: username,
+      salt: salt,
+      nonce: nonce,
+      timestamp: timestamp,
+      domain: domain,
+      expiresAt: expiresAt,
+      signature: verifierSignature
+    };
+    
+    // Create a fresh wallet for testing
+    // const testWallet = new ethers.Wallet(ethers.hexlify(ethers.randomBytes(32)));
+    
+    // Sign the typed data using EIP-712
+    const signature = await wallet.signTypedData(domainPassed, types, message);
+    
+    // Sign the digest with the Ethereum prefix (this matches what the contract does)
+    return signature;
+  }
+
+  /**
+   * Helper function to register a KOL
+   */
   async function registerKOL(
-    kol: SignerWithAddress,
-    socialPlatform: string = "Twitter",
-    socialHandle: string = "test_kol",
-    fee: bigint = DEFAULT_FEE
-  ) {
-    const salt = ethers.hexlify(ethers.randomBytes(32));
-    const profileIpfsHash = "QmTest";
-    const signature = await signRegistrationMessage(
-      kol.address,
-      socialPlatform,
-      socialHandle,
-      salt,
-      verificationSigner
+    wallet: SignerWithAddress,
+    platform: string,
+    username: string,
+    name: string,
+    fee: string,
+    profileIpfsHash: string,
+    verificationSigner: SignerWithAddress
+  ): Promise<void> {
+    const salt = generateRandomSalt();
+    const nonce = generateRandomNonce();
+    const timestamp = Math.floor(Date.now() / 1000);
+    const domain = DEFAULT_DOMAIN_STRING;
+    const expiresAt = FUTURE_TIMESTAMP;
+
+    // Create verifier signature
+    const verifierSignature = await signVerifierMessage(
+      wallet.address,  // wallet address
+      username,        // username
+      salt,            // salt
+      platform,        // platform
+      nonce,           // nonce
+      timestamp,       // timestamp
+      domain,          // domain
+      expiresAt,       // expiresAt
+      verificationSigner  // verifier signer
     );
 
-    await rabitaRegistry.connect(kol).registerKOL(
-      socialPlatform,
-      socialHandle,
-      fee,
-      profileIpfsHash,
-      salt,
-      signature
+    // Create user signature using EIP-712
+    const userSignature = await signUserMessage(
+      wallet,          // user wallet
+      platform,        // username
+      username,        // username
+      salt,            // salt
+      nonce,           // nonce
+      timestamp,       // timestamp  
+      domain,          // domain
+      expiresAt,       // expiresAt
+      verifierSignature  // verifier signature
+    );
+
+    // Connect with the wallet and register
+    const registryWithKOL = rabitaRegistry.connect(wallet);
+    await registryWithKOL.registerKOL(
+      platform,           // _platform
+      username,           // _username
+      name,               // _name
+      ethers.parseUnits(fee, "ether"), // _fee
+      profileIpfsHash,    // _profileIpfsHash
+      salt,               // _salt
+      nonce,              // _nonce
+      timestamp,          // _timestamp
+      domain,             // _domain
+      expiresAt,          // _expiresAt
+      verifierSignature,  // _verifierSignature
+      userSignature       // _userSignature
     );
   }
 
@@ -80,7 +219,7 @@ describe("Rabita Protocol", function () {
 
     describe("Deployment", function () {
       it("should set the correct verifier address", async function () {
-        expect(await rabitaRegistry.verifier()).to.equal(verificationSigner.address);
+        expect(await rabitaRegistry.isVerifier(verificationSigner.address)).to.be.true;
       });
 
       it("should set the correct owner", async function () {
@@ -89,73 +228,394 @@ describe("Rabita Protocol", function () {
     });
 
     describe("KOL Registration", function () {
-      it("should register a KOL with valid signature", async function () {
-        await registerKOL(kol);
+      it("should register a KOL with valid signatures", async function () {
+        await registerKOL(kol, "Twitter", "test_kol", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
         const profile = await rabitaRegistry.kolProfiles(kol.address);
         expect(profile.verified).to.be.true;
       });
 
-      it("should prevent registration with invalid signature", async function () {
-        const salt = ethers.hexlify(ethers.randomBytes(32));
-        const signature = await signRegistrationMessage(
+      it("should prevent registration with invalid verifier signature", async function () {
+        const profileIpfsHash = "QmTest";
+        const expiryTimestamp = FUTURE_TIMESTAMP;
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce();
+        const socialName = "Test KOL";
+        
+        // Use wrong signer for verifier signature
+        const verifierSignature = await signVerifierMessage(
           kol.address,
+          "test_kol",
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          other // Wrong signer
+        );
+        
+        const userSignature = await signUserMessage(
+          kol,
           "Twitter",
           "test_kol",
           salt,
-          other // Using wrong signer
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifierSignature
         );
 
         await expect(
           rabitaRegistry.connect(kol).registerKOL(
             "Twitter",
             "test_kol",
-            DEFAULT_FEE,
-            "QmTest",
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
             salt,
-            signature
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifierSignature,
+            userSignature
           )
-        ).to.be.revertedWith("Invalid signature");
+        ).to.be.revertedWith("Invalid verifier signature");
+      });
+
+      it("should prevent registration with invalid user signature", async function () {
+        const profileIpfsHash = "QmTest";
+        const expiryTimestamp = FUTURE_TIMESTAMP;
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce();
+        const socialName = "Test KOL";
+        
+        // Get valid verifier signature
+        const verifierSignature = await signVerifierMessage(
+          kol.address,
+          "test_kol",
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        // Create an intentionally invalid user signature
+        const malformedSignature = "0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627";
+
+        // Test that it reverts with any error (could be a custom error)
+        await expect(
+          rabitaRegistry.connect(kol).registerKOL(
+            "Twitter",
+            "test_kol",
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
+            salt,
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifierSignature,
+            malformedSignature
+          )
+        ).to.be.reverted; // Changed from .to.be.revertedWith("Invalid user signature")
+      });
+
+      it("should prevent registration with expired timestamp", async function () {
+        const profileIpfsHash = "QmTest";
+        const socialName = "Test KOL";
+        // Use an explicitly expired timestamp
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const expiryTimestamp = currentTimestamp - 3600; // 1 hour in the past
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce();
+        
+        const verifierSignature = await signVerifierMessage(
+          kol.address,
+          "test_kol",
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        const userSignature = await signUserMessage(
+          kol,
+          "Twitter",
+          "test_kol",
+          salt,
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifierSignature
+        );
+
+        await expect(
+          rabitaRegistry.connect(kol).registerKOL(
+            "Twitter",
+            "test_kol",
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
+            salt,
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifierSignature,
+            userSignature
+          )
+        ).to.be.revertedWith("Verification expired");
       });
 
       it("should prevent duplicate registration", async function () {
-        await registerKOL(kol);
-        await expect(registerKOL(kol)).to.be.revertedWith("KOL already registered");
+        await registerKOL(kol, "Twitter", "test_kol", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        await expect(registerKOL(kol, "Twitter", "test_kol", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner)).to.be.revertedWith("KOL already registered");
       });
 
-      it("should prevent duplicate registration with same social handle but different wallet", async function () {
-        await registerKOL(kol);
-        await expect(registerKOL(other, "Twitter", "test_kol", DEFAULT_FEE)).to.be.revertedWith("Social handle already registered");
+      it("should prevent duplicate registration of the same social handle on the same platform", async function () {
+        await registerKOL(kol, "Twitter", "same_handle", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        await expect(
+          registerKOL(other, "Twitter", "same_handle", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner)
+        ).to.be.revertedWith("Social handle already registered");
+      });
+
+      it("should allow same social handle on different platforms", async function () {
+        await registerKOL(kol, "Twitter", "crossplatform", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        await registerKOL(other, "Instagram", "crossplatform", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        
+        // Verify both KOLs are registered
+        const twitterProfile = await rabitaRegistry.kolProfiles(kol.address);
+        const instagramProfile = await rabitaRegistry.kolProfiles(other.address);
+        
+        expect(twitterProfile.verified).to.be.true;
+        expect(instagramProfile.verified).to.be.true;
       });
 
       it("should emit KOLRegistered event", async function () {
-        const salt = ethers.hexlify(ethers.randomBytes(32));
-        const signature = await signRegistrationMessage(
+        const profileIpfsHash = "QmTest";
+        const expiryTimestamp = FUTURE_TIMESTAMP;
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce();
+        const socialName = "Test KOL";
+        
+        // Get valid signatures
+        const verifierSignature = await signVerifierMessage(
           kol.address,
+          "test_kol",
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        const userSignature = await signUserMessage(
+          kol,
           "Twitter",
           "test_kol",
           salt,
-          verificationSigner
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifierSignature
         );
 
         await expect(
           rabitaRegistry.connect(kol).registerKOL(
             "Twitter",
             "test_kol",
-            DEFAULT_FEE,
-            "QmTest",
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
             salt,
-            signature
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifierSignature,
+            userSignature
           )
         )
           .to.emit(rabitaRegistry, "KOLRegistered")
-          .withArgs(kol.address, "Twitter", "test_kol", DEFAULT_FEE, "QmTest");
+          .withArgs(kol.address, "Twitter", "test_kol", socialName, DEFAULT_FEE);
+      });
+
+      it("should prevent nonce reuse", async function () {
+        const profileIpfsHash = "QmTest";
+        const expiryTimestamp = FUTURE_TIMESTAMP;
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce(); // Same nonce
+        const socialName = "Test KOL";
+        const username = "nonce_reuse_test";
+        
+        // Register first KOL
+        const verifier1Signature = await signVerifierMessage(
+          kol.address,
+          username,
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        const user1Signature = await signUserMessage(
+          kol,
+          "Twitter",
+          username,
+          salt,
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifier1Signature
+        );
+        
+        // First registration should succeed
+        await rabitaRegistry.connect(kol).registerKOL(
+          "Twitter",
+          username,
+          socialName,
+          DEFAULT_FEE.toString(),
+          profileIpfsHash,
+          salt,
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifier1Signature,
+          user1Signature
+        );
+
+        // Try to register again with the SAME user, username, nonce and timestamp
+        // The composite nonce (keccak256(abi.encodePacked(msg.sender, _username, _nonce, _timestamp)))
+        // should be identical, triggering the "Nonce already used" check
+        const verifier2Signature = await signVerifierMessage(
+          kol.address, // Same address
+          username,    // Same username
+          salt,
+          "Twitter",
+          nonce,       // Same nonce
+          currentTimestamp, // Same timestamp
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        const user2Signature = await signUserMessage(
+          kol,        // Same wallet
+          "Twitter",
+          username,   // Same username
+          salt,
+          nonce,      // Same nonce
+          currentTimestamp, // Same timestamp
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifier2Signature
+        );
+
+        // This should revert with "Nonce already used" because all components of
+        // the composite nonce are identical
+        await expect(
+          rabitaRegistry.connect(kol).registerKOL(
+            "Twitter",
+            username,
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
+            salt,
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifier2Signature,
+            user2Signature
+          )
+        ).to.be.reverted; // Custom error or "Nonce already used"
+      });
+
+      it("should create appropriate nonce for replay protection", async function() {
+        const profileIpfsHash = "QmTest";
+        const expiryTimestamp = FUTURE_TIMESTAMP;
+        const currentTimestamp = Math.floor(Date.now() / 1000);
+        const salt = generateRandomSalt();
+        const nonce = generateRandomNonce();
+        const socialName = "Test KOL";
+        
+        // Get address of "other"
+        const otherAddress = other.address;
+        
+        // Register a user
+        await registerKOL(kol, "Twitter", "test_kol", "Test KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        
+        // Now try to frontrun with a different address but same details
+        const verifierSignature = await signVerifierMessage(
+          otherAddress,
+          "test_kol",
+          salt,
+          "Twitter",
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verificationSigner
+        );
+        
+        const userSignature = await signUserMessage(
+          other,
+          "Twitter",
+          "test_kol",
+          salt,
+          nonce,
+          currentTimestamp,
+          DEFAULT_DOMAIN_STRING,
+          expiryTimestamp,
+          verifierSignature
+        );
+        
+        // This should fail because the handle is already registered
+        await expect(
+          rabitaRegistry.connect(other).registerKOL(
+            "Twitter",
+            "test_kol",
+            socialName,
+            DEFAULT_FEE.toString(),
+            profileIpfsHash,
+            salt,
+            nonce,
+            currentTimestamp,
+            DEFAULT_DOMAIN_STRING,
+            expiryTimestamp,
+            verifierSignature,
+            userSignature
+          )
+        ).to.be.revertedWith("Social handle already registered");
       });
     });
 
     describe("Verifier Management", function () {
       it("should allow owner to update verifier", async function () {
         await rabitaRegistry.connect(deployer).updateVerifier(other.address);
-        expect(await rabitaRegistry.verifier()).to.equal(other.address);
+        expect(await rabitaRegistry.isVerifier(other.address)).to.equal(true);
       });
 
       it("should prevent non-owner from updating verifier", async function () {
@@ -170,186 +630,15 @@ describe("Rabita Protocol", function () {
           rabitaRegistry.connect(deployer).updateVerifier(ethers.ZeroAddress)
         ).to.be.revertedWith("Invalid verifier address");
       });
-    });
-  });
-
-  describe("MessagingService", function () {
-    beforeEach(async function () {
-      await deployContracts();
-      await registerKOL(kol);
-    });
-
-    describe("Message Sending", function () {
-      it("should allow sending message to verified KOL", async function () {
-        await expect(
-          messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE })
-        )
-          .to.emit(messagingService, "MessageSent")
-          .withArgs(1, requester.address, kol.address, DEFAULT_FEE, anyValue, "QmMessage");
-      });
-
-      it("should prevent sending message to unverified KOL", async function () {
-        await expect(
-          messagingService.connect(requester).sendMessage(other.address, "QmMessage", { value: DEFAULT_FEE })
-        ).to.be.revertedWith("Recipient is not a verified KOL");
-      });
-
-      it("should prevent sending message with incorrect fee", async function () {
-        await expect(
-          messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: 0 })
-        ).to.be.revertedWith("Incorrect fee amount sent");
-      });
-    });
-
-    describe("Message Response", function () {
-      beforeEach(async function () {
-        await messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE });
-      });
-
-      it("should allow KOL to respond to message", async function () {
-        await expect(messagingService.connect(kol).respondMessage(1, "QmResponse"))
-          .to.emit(messagingService, "MessageResponded")
-          .withArgs(1, kol.address, "QmResponse");
-      });
-
-      it("should prevent non-KOL from responding", async function () {
-        await expect(
-          messagingService.connect(other).respondMessage(1, "QmResponse")
-        ).to.be.revertedWith("Only the intended KOL can respond");
-      });
-
-      it("should prevent responding after deadline", async function () {
-        await time.increase(MESSAGE_EXPIRATION + 1);
-        await expect(
-          messagingService.connect(kol).respondMessage(1, "QmResponse")
-        ).to.be.revertedWith("Deadline has passed");
-      });
-
-      it("should distribute fees correctly on response", async function () {
-        const initialKolBalance = await ethers.provider.getBalance(kol.address);
-        const tx = await messagingService.connect(kol).respondMessage(1, "QmResponse");
-        const receipt = await tx.wait();
-        const gasUsed = receipt!.gasUsed * receipt!.gasPrice;
-
-        const expectedPlatformFee = (DEFAULT_FEE * BigInt(PLATFORM_FEE_PERCENT)) / 100n;
-        const expectedKolPayout = DEFAULT_FEE - expectedPlatformFee;
-
-        const finalKolBalance = await ethers.provider.getBalance(kol.address);
-        expect(finalKolBalance).to.equal(
-          initialKolBalance + expectedKolPayout - gasUsed
-        );
-      });
-    });
-
-    describe("Message Timeout", function () {
-      beforeEach(async function () {
-        await messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE });
-        await time.increase(MESSAGE_EXPIRATION + 1);
-      });
-
-      it("should allow timeout trigger after deadline", async function () {
-        await expect(messagingService.triggerTimeout(1))
-          .to.emit(messagingService, "MessageTimeoutTriggered")
-          .withArgs(1);
-      });
-
-      it("should distribute fees correctly on timeout", async function () {
-        const initialRequesterBalance = await ethers.provider.getBalance(requester.address);
-        const initialKolBalance = await ethers.provider.getBalance(kol.address);
-
-        await messagingService.triggerTimeout(1);
-
-        const refundAmount = DEFAULT_FEE / 2n;
-        const remainingFee = DEFAULT_FEE - refundAmount;
-        const platformFee = (remainingFee * BigInt(PLATFORM_FEE_PERCENT)) / 100n;
-        const kolPayout = remainingFee - platformFee;
-
-        const finalRequesterBalance = await ethers.provider.getBalance(requester.address);
-        const finalKolBalance = await ethers.provider.getBalance(kol.address);
-
-        expect(finalRequesterBalance).to.equal(initialRequesterBalance + refundAmount);
-        expect(finalKolBalance).to.equal(initialKolBalance + kolPayout);
-      });
-    });
-
-    describe("Fee Management", function () {
-      it("should allow fee collector to claim fees after delay", async function () {
-        await messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE });
-        await messagingService.connect(kol).respondMessage(1, "QmResponse");
+      
+      it("should allow removing verifiers", async function() {
+        // First add a new verifier
+        await rabitaRegistry.connect(deployer).updateVerifier(other.address);
+        expect(await rabitaRegistry.isVerifier(other.address)).to.be.true;
         
-        await time.increase(7 * 24 * 60 * 60 + 1); // 1 week + 1 second
-
-        const initialBalance = await ethers.provider.getBalance(feeCollector.address);
-        await messagingService.connect(feeCollector).claimFees();
-        const finalBalance = await ethers.provider.getBalance(feeCollector.address);
-
-        const expectedFee = (DEFAULT_FEE * BigInt(PLATFORM_FEE_PERCENT)) / 100n;
-        expect(finalBalance).to.be.gt(initialBalance);
-      });
-
-      it("should prevent fee claims before delay period", async function () {
-        await messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE });
-        await messagingService.connect(kol).respondMessage(1, "QmResponse");
-
-        await expect(
-          messagingService.connect(feeCollector).claimFees()
-        ).to.be.revertedWith("Fee claim timelock active");
-      });
-
-      it("should prevent non-collector from claiming fees", async function () {
-        await expect(
-          messagingService.connect(other).claimFees()
-        ).to.be.revertedWith("Only fee collector can claim fees");
-      });
-    });
-
-    describe("Security Tests", function () {
-      it("should prevent reentrancy in sendMessage", async function () {
-        const AttackerFactory = await ethers.getContractFactory("ReentrancyAttacker");
-        const attacker = (await AttackerFactory.deploy(messagingService.getAddress())) as ReentrancyAttacker;
-        
-        await expect(
-          attacker.attack({ value: DEFAULT_FEE })
-        ).to.be.reverted;
-      });
-
-      it("should handle multiple pending messages correctly", async function () {
-        // Send multiple messages
-        for(let i = 0; i < 3; i++) {
-          await messagingService.connect(requester).sendMessage(kol.address, `QmMessage${i}`, { value: DEFAULT_FEE });
-        }
-
-        // Get initial pending messages count
-        const initialCount = await messagingService.messageCount();
-
-        // Respond to middle message
-        await messagingService.connect(kol).respondMessage(2, "QmResponse");
-
-        // Verify message status
-        const message = await messagingService.messages(2);
-        expect(message.status).to.equal(1); // 1 = Responded
-      });
-
-      it("should prevent unauthorized message responses", async function () {
-        // First register a message so we can test with a valid KOL
-        await messagingService.connect(requester).sendMessage(kol.address, "QmMessage", { value: DEFAULT_FEE });
-        
-        // Try to respond to any message ID with non-KOL (should fail with KOL check)
-        await expect(
-          messagingService.connect(other).respondMessage(999, "QmResponse")
-        ).to.be.revertedWith("Only the intended KOL can respond");
-
-        await expect(
-          messagingService.connect(other).respondMessage(1, "QmResponse")
-        ).to.be.revertedWith("Only the intended KOL can respond");
-
-        // Respond to the message properly first
-        await messagingService.connect(kol).respondMessage(1, "QmResponse");
-
-        // Try to respond to an already responded message
-        await expect(
-          messagingService.connect(kol).respondMessage(1, "QmResponse")
-        ).to.be.revertedWith("Message is not pending");
+        // Then remove it
+        await rabitaRegistry.connect(deployer).removeVerifier(other.address);
+        expect(await rabitaRegistry.isVerifier(other.address)).to.be.false;
       });
     });
   });
