@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 interface IKOLRegistry {
     function kolProfiles(address)
@@ -12,13 +14,16 @@ interface IKOLRegistry {
             address wallet,
             string memory socialPlatform,
             string memory socialHandle,
+            string memory socialName,
             uint256 fee,
             string memory profileIpfsHash,
-            bool verified
+            bool verified,
+            uint256 registeredAt
         );
+    function pgpPublicKeys(address) external view returns (bytes memory);
+    function pgpNonce(address) external view returns (uint256);
 }
 
-// Custom errors for gas optimization and better error handling
 error NotVerifiedKOL();
 error IncorrectFeeAmount();
 error MessageNotPending();
@@ -33,8 +38,13 @@ error NoFeesAvailable();
 error FeeTransferFailed();
 error InvalidKOLRegistryAddress();
 error InvalidFeeCollectorAddress();
+error InvalidEncryptionProof();
+error InvalidMessageHash();
 
-contract Messaging is ReentrancyGuard, Ownable {
+contract RabitaMessaging is ReentrancyGuard, Ownable {
+    using ECDSA for bytes32;
+    using MessageHashUtils for bytes32;
+
     uint256 public constant MESSAGE_EXPIRATION = 7 days;
     uint256 public constant PLATFORM_FEE_PERCENT = 7;
 
@@ -48,23 +58,28 @@ contract Messaging is ReentrancyGuard, Ownable {
         uint256 id;
         address sender;
         address kol;
-        string messageIpfsHash;
         uint256 fee;
         uint256 timestamp;
         uint256 deadline;
+        string content;
         MessageStatus status;
+    }
+
+    struct MessageMetadata {
+        bytes senderPGPPublicKey;
+        uint256 senderPGPNonce;
+        uint256 version;
     }
 
     uint256 public messageCount;
     mapping(uint256 => Message) public messages;
+    mapping(uint256 => MessageMetadata) public messageMetadata;
     uint256[] public pendingMessageIds;
     mapping(uint256 => uint256) public pendingMessageIndex;
 
     IKOLRegistry public kolRegistry;
-
     address public feeCollector;
     uint256 public accumulatedFees;
-
     uint256 public feeClaimDelay = 1 weeks;
     uint256 public lastFeeClaimTimestamp;
 
@@ -74,12 +89,18 @@ contract Messaging is ReentrancyGuard, Ownable {
         address indexed kol,
         uint256 fee,
         uint256 deadline,
-        string messageIpfsHash
+        string content
+    );
+    event SenderPGPUpdated(
+        address indexed sender,
+        uint256 indexed messageId,
+        bytes pgpPublicKey,
+        uint256 pgpNonce
     );
     event MessageResponded(
         uint256 indexed messageId,
         address indexed kol,
-        string responseIpfsHash
+        string content
     );
     event MessageTimeoutTriggered(uint256 indexed messageId);
     event FeesClaimed(uint256 amount, uint256 timestamp);
@@ -119,12 +140,13 @@ contract Messaging is ReentrancyGuard, Ownable {
         netPayout = halfFee - platformFee;
     }
 
-    function sendMessage(address _kol, string memory _messageIpfsHash)
-        external
-        payable
-        nonReentrant
-    {
-        (, , , uint256 fee, , bool verified) = kolRegistry.kolProfiles(_kol);
+    function sendEncryptedMessage(
+        address _kol,
+        bytes memory _senderPGPPublicKey,
+        uint256 _senderPGPNonce,
+        string memory content
+    ) external payable nonReentrant {
+        (, , , , uint256 fee, , bool verified, ) = kolRegistry.kolProfiles(_kol);
         if (!verified) revert NotVerifiedKOL();
         if (msg.value != fee) revert IncorrectFeeAmount();
 
@@ -135,23 +157,37 @@ contract Messaging is ReentrancyGuard, Ownable {
             id: messageCount,
             sender: msg.sender,
             kol: _kol,
-            messageIpfsHash: _messageIpfsHash,
             fee: fee,
             timestamp: block.timestamp,
             deadline: deadline,
+            content: content,
             status: MessageStatus.Pending
+        });
+
+        messageMetadata[messageCount] = MessageMetadata({
+            senderPGPPublicKey: _senderPGPPublicKey,
+            senderPGPNonce: _senderPGPNonce,
+            version: 1
         });
 
         pendingMessageIds.push(messageCount);
         pendingMessageIndex[messageCount] = pendingMessageIds.length - 1;
 
-        emit MessageSent(messageCount, msg.sender, _kol, fee, deadline, _messageIpfsHash);
+        emit MessageSent(
+            messageCount,
+            msg.sender,
+            _kol,
+            fee,
+            deadline,
+            content
+        );
+        emit SenderPGPUpdated(msg.sender, messageCount, _senderPGPPublicKey, _senderPGPNonce);
     }
 
-    function respondMessage(uint256 _messageId, string memory _responseIpfsHash)
-        external
-        nonReentrant
-    {
+    function respondToEncryptedMessage(
+        uint256 _messageId,
+        string memory content
+    ) external nonReentrant {
         Message storage msgObj = messages[_messageId];
         if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
         if (msg.sender != msgObj.kol) revert NotAuthorizedKOL();
@@ -166,27 +202,7 @@ contract Messaging is ReentrancyGuard, Ownable {
         (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
         if (!payoutSent) revert PayoutToKOLFailed();
 
-        emit MessageResponded(_messageId, msg.sender, _responseIpfsHash);
-    }
-
-    function triggerTimeout(uint256 _messageId) public nonReentrant {
-        Message storage msgObj = messages[_messageId];
-        if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
-        if (block.timestamp <= msgObj.deadline) revert DeadlineNotReached();
-
-        msgObj.status = MessageStatus.Expired;
-        _removePendingMessage(_messageId);
-
-        (uint256 platformFee, uint256 netPayout, uint256 refundAmount) = _calculateTimeoutPayout(msgObj.fee);
-
-        (bool refundSent, ) = msgObj.sender.call{value: refundAmount}("");
-        if (!refundSent) revert RefundTransferFailed();
-
-        accumulatedFees += platformFee;
-        (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
-        if (!payoutSent) revert PayoutToKOLFailed();
-
-        emit MessageTimeoutTriggered(_messageId);
+        emit MessageResponded(_messageId, msg.sender, content);
     }
 
     function _removePendingMessage(uint256 _messageId) internal {
@@ -224,6 +240,26 @@ contract Messaging is ReentrancyGuard, Ownable {
         }
     }
 
+    function triggerTimeout(uint256 _messageId) public nonReentrant {
+        Message storage msgObj = messages[_messageId];
+        if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
+        if (block.timestamp <= msgObj.deadline) revert DeadlineNotReached();
+
+        msgObj.status = MessageStatus.Expired;
+        _removePendingMessage(_messageId);
+
+        (uint256 platformFee, uint256 netPayout, uint256 refundAmount) = _calculateTimeoutPayout(msgObj.fee);
+
+        (bool refundSent, ) = msgObj.sender.call{value: refundAmount}("");
+        if (!refundSent) revert RefundTransferFailed();
+
+        accumulatedFees += platformFee;
+        (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
+        if (!payoutSent) revert PayoutToKOLFailed();
+
+        emit MessageTimeoutTriggered(_messageId);
+    }
+
     function claimFees() external nonReentrant {
         if (msg.sender != feeCollector) revert NotFeeCollector();
         if (block.timestamp < lastFeeClaimTimestamp + feeClaimDelay) revert FeeClaimTimelockActive();
@@ -238,4 +274,4 @@ contract Messaging is ReentrancyGuard, Ownable {
 
         emit FeesClaimed(amount, block.timestamp);
     }
-}
+} 

@@ -15,9 +15,9 @@ async function main() {
 
   console.log("Deploying contracts using Ignition...");
   const RabitaApp = await hre.ethers.getContractFactory("RabitaRegistry")
-  const MessagingService = await hre.ethers.getContractFactory("Messaging")
+  const MessagingService = await hre.ethers.getContractFactory("RabitaMessaging")
 
-  const rabitaRegistry = await RabitaApp.deploy(verifierAddress);
+  const rabitaRegistry = await RabitaApp.attach("0xBfbE9589A29879eb88A44354EB976a0A9ea6f8A3");
   const messagingService = await MessagingService.deploy(await rabitaRegistry.getAddress(), feeCollectorAddress);
 
   const rabitaRegistryAddress = await rabitaRegistry.getAddress();

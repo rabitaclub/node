@@ -28,8 +28,9 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
     mapping(address => KOLProfile) public kolProfiles;
     mapping(string => mapping(string => KOLProfile)) public socialHandleToKOLProfile;
     mapping(bytes32 => bool) public usedNonces;
-
     mapping(address => bool) public isVerifier;
+    mapping(address => bytes) public pgpPublicKeys;
+    mapping(address => uint256) public pgpNonce;
 
     string private constant DOMAIN_NAME = "Rabita Social Verification";
     string private constant DOMAIN_VERSION = "1";
@@ -42,6 +43,10 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         "SocialVerification(address walletAddress,string platform,string username,bytes32 salt,bytes16 nonce,uint256 timestamp,string domain,uint256 expiresAt,bytes signature)"
     );
 
+    bytes32 private constant PGP_TYPEHASH = keccak256(
+        "PGPSignature(address walletAddress,bytes pgpPublicKey,uint256 pgpNonce)"
+    );
+
     bytes32 public domainSeparatorV4;
 
     event KOLRegistered(
@@ -51,7 +56,7 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         string name,
         uint256 fee
     );
-
+    event PGPKeyUpdated(address indexed wallet, bytes pgpPublicKey, uint pgpNonce);
     event VerifierAdded(address indexed verifier);
     event VerifierRemoved(address indexed verifier);
     
@@ -120,6 +125,24 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         return ((recoveredUser == _wallet), recoveredUser);
     }
 
+    function verifyPGPSignature(
+        address _wallet,
+        bytes memory _pgpPublicKey,
+        uint256 _pgpNonce,
+        bytes memory _pgpSignature
+    ) internal view returns (bool, address) {
+        bytes32 pgpHash = keccak256(abi.encodePacked(
+            PGP_TYPEHASH,
+            _wallet,
+            _pgpPublicKey,
+            _pgpNonce
+        ));
+        
+        bytes32 digest = _hashTypedDataV4(pgpHash);
+        address recoveredPGP = ECDSA.recover(digest, _pgpSignature);
+        return (recoveredPGP == _wallet, recoveredPGP);
+    }
+
     function registerKOL(
         // Social media data
         string memory _platform,
@@ -136,7 +159,8 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         uint256 _expiresAt,
         // Signatures
         bytes memory _verifierSignature,
-        bytes memory _userSignature
+        bytes memory _userSignature,
+        bytes memory _pgpPublicKey
     ) external nonReentrant {
         require(!kolProfiles[msg.sender].verified, "KOL already registered");
         require(socialHandleToKOLProfile[_platform][_username].wallet == address(0), "Social handle already registered");
@@ -190,10 +214,14 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
             verified: true,
             registeredAt: block.timestamp
         });
+
+        pgpPublicKeys[msg.sender] = _pgpPublicKey;
+        pgpNonce[msg.sender]++;
         
         socialHandleToKOLProfile[_platform][_username] = kolProfiles[msg.sender];
         
         emit KOLRegistered(msg.sender, _platform, _username, _name, _fee);
+        emit PGPKeyUpdated(msg.sender, _pgpPublicKey, pgpNonce[msg.sender]);
     }
 
     function isSocialHandleRegistered(string memory _platform, string memory _handle) external view returns (bool) {
@@ -214,5 +242,20 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         require(_verifier != address(0), "Invalid verifier address");
         isVerifier[_verifier] = false;
         emit VerifierRemoved(_verifier);
+    }
+
+    function updatePGPKey(bytes memory _pgpPublicKey, bytes memory _pgpSignature) external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not verified");
+        pgpPublicKeys[msg.sender] = _pgpPublicKey;
+        pgpNonce[msg.sender]++;
+
+        (bool isPGPSignatureValid, ) = verifyPGPSignature(
+            msg.sender,
+            _pgpPublicKey,
+            pgpNonce[msg.sender],
+            _pgpSignature
+        );
+        require(isPGPSignatureValid, "Invalid PGP signature");
+        emit PGPKeyUpdated(msg.sender, _pgpPublicKey, pgpNonce[msg.sender]);
     }
 }
