@@ -19,3 +19,4 @@ ignition/deployments/chain-31337
 deployParameters.json
 contracts/test/*
 docs/*
+testCall.ts

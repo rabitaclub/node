@@ -21,6 +21,8 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         string socialName;
         uint256 fee;
         string profileIpfsHash;
+        string tags;
+        string description;
         bool verified;
         uint256 registeredAt;
     }
@@ -56,9 +58,17 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         string name,
         uint256 fee
     );
+    event KOLData(
+        address indexed wallet,
+        string profileIpfsHash,
+        string tags,
+        string description
+    );
     event PGPKeyUpdated(address indexed wallet, bytes pgpPublicKey, uint pgpNonce);
+    event KOLFeeUpdated(address indexed wallet, uint256 fee);
     event VerifierAdded(address indexed verifier);
     event VerifierRemoved(address indexed verifier);
+    event KOLUnregistered(address indexed wallet);
     
     constructor(address _verifier) Ownable(msg.sender) EIP712(DOMAIN_NAME, DOMAIN_VERSION) {
         require(_verifier != address(0), "Invalid verifier address");
@@ -151,6 +161,8 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         // KOL data
         uint256 _fee,
         string memory _profileIpfsHash,
+        string memory _tags,
+        string memory _description,
         // Verification data
         bytes32 _salt,
         bytes16 _nonce,
@@ -211,6 +223,8 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
             socialName: _name,
             fee: _fee,
             profileIpfsHash: _profileIpfsHash,
+            tags: _tags,
+            description: _description,
             verified: true,
             registeredAt: block.timestamp
         });
@@ -222,6 +236,7 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         
         emit KOLRegistered(msg.sender, _platform, _username, _name, _fee);
         emit PGPKeyUpdated(msg.sender, _pgpPublicKey, pgpNonce[msg.sender]);
+        emit KOLData(msg.sender, _profileIpfsHash, _tags, _description);
     }
 
     function isSocialHandleRegistered(string memory _platform, string memory _handle) external view returns (bool) {
@@ -245,7 +260,7 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
     }
 
     function updatePGPKey(bytes memory _pgpPublicKey, bytes memory _pgpSignature) external nonReentrant {
-        require(kolProfiles[msg.sender].verified, "KOL not verified");
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
         pgpPublicKeys[msg.sender] = _pgpPublicKey;
         pgpNonce[msg.sender]++;
 
@@ -257,5 +272,38 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         );
         require(isPGPSignatureValid, "Invalid PGP signature");
         emit PGPKeyUpdated(msg.sender, _pgpPublicKey, pgpNonce[msg.sender]);
+    }
+
+    function updateKOLFee(uint256 _fee) external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
+        require(_fee > 0, "Fee must be greater than 0");
+        kolProfiles[msg.sender].fee = _fee;
+        emit KOLFeeUpdated(msg.sender, _fee);
+    }
+
+    function updateKOLData(
+        string memory _value,
+        string memory _key
+    ) external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
+        if (keccak256(abi.encodePacked(_key)) == keccak256(abi.encodePacked("profileIpfsHash"))) {
+            kolProfiles[msg.sender].profileIpfsHash = _value;
+        } else if (keccak256(abi.encodePacked(_key)) == keccak256(abi.encodePacked("tags"))) {
+            kolProfiles[msg.sender].tags = _value;
+        } else if (keccak256(abi.encodePacked(_key)) == keccak256(abi.encodePacked("description"))) {
+            kolProfiles[msg.sender].description = _value;
+        } else {
+            revert("Invalid key");
+        }
+        emit KOLData(msg.sender, kolProfiles[msg.sender].profileIpfsHash, kolProfiles[msg.sender].tags, kolProfiles[msg.sender].description);
+    }
+
+    function unregisterKOL() external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
+        delete socialHandleToKOLProfile[kolProfiles[msg.sender].socialPlatform][kolProfiles[msg.sender].socialHandle];
+        delete pgpPublicKeys[msg.sender];
+        delete kolProfiles[msg.sender];
+
+        emit KOLUnregistered(msg.sender);
     }
 }

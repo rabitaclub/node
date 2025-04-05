@@ -1,5 +1,5 @@
 import { ethers } from "hardhat";
-import { RabitaRegistry, Messaging } from "../typechain-types";
+import { RabitaRegistry, RabitaMessaging } from "../typechain-types";
 
 /**
  * Creates a verifier signature for KOL data
@@ -54,7 +54,7 @@ async function main() {
   }
 
   const rabitaRegistry = await ethers.getContractAt("RabitaRegistry", rabitaRegistryAddress) as unknown as RabitaRegistry;
-  const messagingService = await ethers.getContractAt("Messaging", messagingServiceAddress) as unknown as Messaging;
+  const messagingService = await ethers.getContractAt("RabitaMessaging", messagingServiceAddress) as unknown as RabitaMessaging;
 
   console.log("RabitaRegistry address:", await rabitaRegistry.getAddress());
   console.log("MessagingService address:", await messagingService.getAddress());
