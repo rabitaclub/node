@@ -263,8 +263,8 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
 
 
         emit MessageSent(
-            msgObj.sender,
             msgObj.kol,
+            msgObj.sender,
             content
         );
     }
