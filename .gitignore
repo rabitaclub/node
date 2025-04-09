@@ -20,3 +20,5 @@ deployParameters.json
 contracts/test/*
 docs/*
 testCall.ts
+bin/
+bin/contracts/*
