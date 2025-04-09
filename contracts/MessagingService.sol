@@ -34,14 +34,19 @@ error MessageDeadlinePassed();
 error DeadlineNotReached();
 error PayoutToKOLFailed();
 error RefundTransferFailed();
-error NotFeeCollector();
-error FeeClaimTimelockActive();
-error NoFeesAvailable();
-error FeeTransferFailed();
 error InvalidKOLRegistryAddress();
-error InvalidFeeCollectorAddress();
+error InvalidAddress();
 error InvalidEncryptionProof();
 error InvalidMessageHash();
+error FeeTransferFailed();
+error NoFeesAvailable();
+error InvalidRefundPercentage();
+error InvalidPayoutAmount();
+error InvalidBatchSize(uint256 size);
+error EmptyContent();
+error InvalidPGPKey();
+error InvalidMessageLength(uint256 length);
+error InvalidFeeCalculation(uint256 expected, uint256 provided);
 
 contract RabitaMessaging is ReentrancyGuard, Ownable {
     using ECDSA for bytes32;
@@ -69,13 +74,19 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
     }
 
     struct MessageMetadata {
-        bytes senderPGPPublicKey;
+        bytes32 senderPGPPublicKeyHash;
         uint256 senderPGPNonce;
         uint256 version;
     }
 
+    struct PayoutResult {
+        uint256 platformFee;
+        uint256 receiverAmount;
+    }
+
     mapping(uint256 => Message) public messages;
-    mapping(uint256 => MessageMetadata) public messageMetadata;    
+    mapping(uint256 => MessageMetadata) public messageMetadata;
+    mapping(address => uint256) public kolEarnedFees;
     mapping(address => mapping(address => uint256)) public userToKolFeesCollected;
     mapping(address => mapping(address => uint256)) public userToKolLatestMessage;
     mapping(address => mapping(address => uint256)) public kolToUserLastReply;
@@ -88,10 +99,8 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
     address[] public activeKols;
     uint256 public activePairCount;
     uint256 public messageCount;
-    address public feeCollector;
-    uint256 public accumulatedFees;
-    uint256 public feeClaimDelay = 1 weeks;
-    uint256 public lastFeeClaimTimestamp;
+    address public devAddress;
+    uint256 public timeoutRefundPercent = 45;
 
     event MessageSentToKOL(
         uint256 indexed messageId,
@@ -111,43 +120,93 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         string content
     );
     event MessageTimeoutTriggered(uint256 indexed messageId);
-    event FeesClaimed(uint256 amount, uint256 timestamp);
+    event KOLPaid(address indexed kol, address indexed sender, uint256 amount);
+    event DevAddressUpdated(address indexed oldDevAddress, address indexed newDevAddress);
+    event FeesTransferred(uint256 amount, address devAddress);
+    event RefundSent(address indexed receiver, uint256 amount);
     event ActivePairAdded(address indexed sender, address indexed kol);
     event ActivePairRemoved(address indexed sender, address indexed kol);
+    event TimeoutRefundPercentUpdated(uint256 oldPercent, uint256 newPercent);
 
-    constructor(address _kolRegistry, address _feeCollector) Ownable(msg.sender) {
+    constructor(address _kolRegistry, address _devAddress) Ownable(msg.sender) {
         if (_kolRegistry == address(0)) revert InvalidKOLRegistryAddress();
-        if (_feeCollector == address(0)) revert InvalidFeeCollectorAddress();
+        if (_devAddress == address(0)) revert InvalidAddress();
         
         kolRegistry = IKOLRegistry(_kolRegistry);
-        feeCollector = _feeCollector;
-        lastFeeClaimTimestamp = block.timestamp;
+        devAddress = _devAddress;
     }
 
     receive() external payable {}
 
-    function _calculateRespondPayout(uint256 baseFee)
-        internal
-        pure
-        returns (uint256 platformFee, uint256 netPayout)
-    {
-        platformFee = (baseFee * PLATFORM_FEE_PERCENT) / 100;
-        netPayout = baseFee - platformFee;
+    function setTimeoutRefundPercent(uint256 _percent) external onlyOwner {
+        if (_percent > 100) revert InvalidRefundPercentage();
+        
+        uint256 oldPercent = timeoutRefundPercent;
+        timeoutRefundPercent = _percent;
+        
+        emit TimeoutRefundPercentUpdated(oldPercent, _percent);
     }
 
-    function _calculateTimeoutPayout(uint256 baseFee)
+    function setDevAddress(address _devAddress) external onlyOwner {
+        if (_devAddress == address(0)) revert InvalidAddress();
+        address oldDevAddress = devAddress;
+        devAddress = _devAddress;
+        emit DevAddressUpdated(oldDevAddress, _devAddress);
+    }
+
+    function _processPayout(
+        uint256 amount,
+        address receiver,
+        address sender,
+        bool isRefund
+    ) internal returns (PayoutResult memory result) {
+        if (amount == 0) revert InvalidPayoutAmount();
+
+        if (isRefund) {
+            result.receiverAmount = amount;
+            result.platformFee = 0;
+        } else {
+            result.platformFee = (amount * PLATFORM_FEE_PERCENT) / 100;
+            result.receiverAmount = amount - result.platformFee;
+            
+            if (result.receiverAmount > 0 && sender != address(0)) {
+                kolEarnedFees[receiver] += result.receiverAmount;
+            }
+        }
+
+        if (isRefund) {
+            (bool sent, ) = receiver.call{value: amount}("");
+            if (!sent) revert RefundTransferFailed();
+            emit RefundSent(receiver, amount);
+        } else {
+            if (result.platformFee > 0) {
+                (bool feeSent, ) = devAddress.call{value: result.platformFee}("");
+                if (!feeSent) revert FeeTransferFailed();
+                emit FeesTransferred(result.platformFee, devAddress);
+            }
+            
+            if (result.receiverAmount > 0) {
+                if (receiver == address(0)) revert InvalidAddress();
+                (bool payoutSent, ) = receiver.call{value: result.receiverAmount}("");
+                if (!payoutSent) revert PayoutToKOLFailed();
+                
+                if (sender != address(0)) {
+                    emit KOLPaid(receiver, sender, result.receiverAmount);
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    function _calculateRespondPayout(uint256 baseFee)
         internal
-        pure
-        returns (
-            uint256 platformFee,
-            uint256 netPayout,
-            uint256 refundAmount
-        )
+        view
+        returns (uint256 remainingFee)
     {
-        refundAmount = baseFee / 2;
-        uint256 halfFee = baseFee / 2;
-        platformFee = (halfFee * PLATFORM_FEE_PERCENT) / 100;
-        netPayout = halfFee - platformFee;
+        uint256 minimumPayout = (baseFee * (100 - timeoutRefundPercent)) / 100;
+        remainingFee = baseFee - minimumPayout;
+        return remainingFee;
     }
     
     function _addActivePair(address sender, address kol) internal {
@@ -156,7 +215,9 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
             activeKols.push(kol);
             activePairIndex[sender][kol] = activePairCount;
             isActivePair[sender][kol] = true;
-            activePairCount++;
+            unchecked {
+                activePairCount++;
+            }
             
             emit ActivePairAdded(sender, kol);
         }
@@ -193,11 +254,17 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         uint256 _senderPGPNonce,
         string memory content
     ) external payable nonReentrant {
+        if (_kol == address(0)) revert InvalidAddress();
+        if (_senderPGPPublicKey.length == 0) revert InvalidPGPKey();
+        if (bytes(content).length == 0) revert EmptyContent();
+        
         (, , , , uint256 fee, , , , bool verified, ) = kolRegistry.kolProfiles(_kol);
         if (!verified) revert NotVerifiedKOL();
         if (msg.value != fee) revert IncorrectFeeAmount();
 
-        messageCount += 1;
+        unchecked {
+            messageCount++;
+        }
         uint256 deadline = block.timestamp + MESSAGE_EXPIRATION;
 
         messages[messageCount] = Message({
@@ -212,15 +279,17 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         });
 
         messageMetadata[messageCount] = MessageMetadata({
-            senderPGPPublicKey: _senderPGPPublicKey,
+            senderPGPPublicKeyHash: keccak256(_senderPGPPublicKey),
             senderPGPNonce: _senderPGPNonce,
             version: 1
         });
-
         _addActivePair(msg.sender, _kol);
-        
+        uint256 minimumPayout = (fee * (100 - timeoutRefundPercent)) / 100;
+        uint256 remainingFee = fee - minimumPayout;
+
         userToKolLatestMessage[msg.sender][_kol] = messageCount;
-        userToKolFeesCollected[msg.sender][_kol] += fee;
+        userToKolFeesCollected[msg.sender][_kol] = remainingFee;
+        _processPayout(minimumPayout, _kol, msg.sender, false);
 
         emit MessageSentToKOL(
             messageCount,
@@ -241,26 +310,19 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         string memory content
     ) external nonReentrant {
         Message storage msgObj = messages[userToKolLatestMessage[_user][msg.sender]];
-        // if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
         if (msg.sender != msgObj.kol) revert NotAuthorizedKOL();
-        if (block.timestamp > msgObj.deadline) revert MessageDeadlinePassed();
 
-        uint256 fee = userToKolFeesCollected[_user][msgObj.kol];
-
-        if (fee != 0) {
+        uint256 remainingFee = userToKolFeesCollected[_user][msgObj.kol];
+        if (remainingFee > 0) {
             msgObj.status = MessageStatus.Responded;
             kolToUserLastReply[msgObj.kol][msgObj.sender] = block.timestamp;
+            userToKolFeesCollected[_user][msgObj.kol] = 0;
             _removeActivePair(msgObj.sender, msgObj.kol);
 
-            (uint256 platformFee, uint256 netPayout) = _calculateRespondPayout(fee);
-            accumulatedFees += platformFee;
-            (bool payoutSent, ) = msgObj.kol.call{value: netPayout}("");
-
-            if (!payoutSent) revert PayoutToKOLFailed();
-            userToKolLatestMessage[_user][msgObj.kol] = 0;
-            userToKolFeesCollected[_user][msgObj.kol] = 0;
+            if (remainingFee > 0) {
+                _processPayout(remainingFee, msgObj.kol, msgObj.sender, false);
+            }
         }
-
 
         emit MessageSent(
             msgObj.kol,
@@ -279,21 +341,28 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         address[] memory processableSenders = new address[](MAX_BATCH_SIZE);
         address[] memory processableKols = new address[](MAX_BATCH_SIZE);
         
-        for (uint256 i = 0; i < activePairCount && processedPairs < MAX_BATCH_SIZE; i++) {
+        uint256 length = activePairCount;
+        for (uint256 i; i < length && processedPairs < MAX_BATCH_SIZE;) {
             address sender = activeSenders[i];
             address kol = activeKols[i];
             
             uint256 fee = userToKolFeesCollected[sender][kol];
             
-            if (fee == 0) continue;
+            if (fee > 0) {
+                Message memory msgData = messages[userToKolLatestMessage[sender][kol]];
+                
+                if (kolToUserLastReply[kol][sender] < msgData.timestamp) {
+                    processableSenders[processedPairs] = sender;
+                    processableKols[processedPairs] = kol;
+                    unchecked {
+                        processedPairs++;
+                    }
+                    upkeepNeeded = true;
+                }
+            }
             
-            Message memory msgData = messages[userToKolLatestMessage[sender][kol]];
-            
-            if (kolToUserLastReply[kol][sender] < msgData.timestamp) {
-                processableSenders[processedPairs] = sender;
-                processableKols[processedPairs] = kol;
-                processedPairs++;
-                upkeepNeeded = true;
+            unchecked {
+                ++i;
             }
         }
         
@@ -301,9 +370,12 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
             address[] memory resultSenders = new address[](processedPairs);
             address[] memory resultKols = new address[](processedPairs);
             
-            for (uint256 i = 0; i < processedPairs; i++) {
+            for (uint256 i; i < processedPairs;) {
                 resultSenders[i] = processableSenders[i];
                 resultKols[i] = processableKols[i];
+                unchecked {
+                    ++i;
+                }
             }
             
             performData = abi.encode(resultSenders, resultKols);
@@ -311,19 +383,28 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
     }
 
     function performUpkeep(bytes calldata performData) external {
-        (address[] memory senders, address[] memory kols) = abi.decode(performData, (address[], address[]));
+        if (performData.length == 0) revert InvalidBatchSize(0);
         
-        for (uint256 i = 0; i < senders.length; i++) {
+        (address[] memory senders, address[] memory kols) = abi.decode(performData, (address[], address[]));
+        if (senders.length != kols.length) revert InvalidBatchSize(senders.length);
+        if (senders.length > MAX_BATCH_SIZE) revert InvalidBatchSize(senders.length);
+        
+        uint256 length = senders.length;
+        for (uint256 i; i < length;) {
             address sender = senders[i];
             address kol = kols[i];
             
             uint256 fee = userToKolFeesCollected[sender][kol];
-            if (fee == 0) continue;
+            if (fee > 0) {
+                Message memory msgData = messages[userToKolLatestMessage[sender][kol]];
+                
+                if (kolToUserLastReply[kol][sender] < msgData.timestamp) {
+                    triggerTimeout(sender, kol);
+                }
+            }
             
-            Message memory msgData = messages[userToKolLatestMessage[sender][kol]];
-            
-            if (kolToUserLastReply[kol][sender] < msgData.timestamp) {
-                triggerTimeout(sender, kol);
+            unchecked {
+                ++i;
             }
         }
     }
@@ -333,38 +414,16 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         if (msgObj.status != MessageStatus.Pending) revert MessageNotPending();
         if (block.timestamp <= msgObj.deadline) revert DeadlineNotReached();
 
-        uint256 fee = userToKolFeesCollected[sender][kol];
-        if (fee == 0) revert NoFeesAvailable();
+        uint256 remainingFee = userToKolFeesCollected[sender][kol];
+        if (remainingFee == 0) revert NoFeesAvailable();
 
         msgObj.status = MessageStatus.Expired;
-        _removeActivePair(sender, kol);
-        
-        (uint256 platformFee, uint256 netPayout, uint256 refundAmount) = _calculateTimeoutPayout(fee);
-        (bool refundSent, ) = sender.call{value: refundAmount}("");
-        if (!refundSent) revert RefundTransferFailed();
-        accumulatedFees += platformFee;
-        (bool payoutSent, ) = kol.call{value: netPayout}("");
-        if (!payoutSent) revert PayoutToKOLFailed();
-
         userToKolLatestMessage[sender][kol] = 0;
         userToKolFeesCollected[sender][kol] = 0;
+        _removeActivePair(sender, kol);
+        _processPayout(remainingFee, sender, address(0), true);
         
         emit MessageTimeoutTriggered(userToKolLatestMessage[sender][kol]);
-    }
-
-    function claimFees() external nonReentrant {
-        if (msg.sender != feeCollector) revert NotFeeCollector();
-        if (block.timestamp < lastFeeClaimTimestamp + feeClaimDelay) revert FeeClaimTimelockActive();
-        if (accumulatedFees == 0) revert NoFeesAvailable();
-
-        uint256 amount = accumulatedFees;
-        accumulatedFees = 0;
-        lastFeeClaimTimestamp = block.timestamp;
-
-        (bool sent, ) = feeCollector.call{value: amount}("");
-        if (!sent) revert FeeTransferFailed();
-
-        emit FeesClaimed(amount, block.timestamp);
     }
     
     function getActivePairCount() external view returns (uint256) {

@@ -11,7 +11,7 @@ const config: HardhatUserConfig = {
       viaIR: true,
     },
   },
-  defaultNetwork: "hardhat",
+  defaultNetwork: "testnet",
   networks: {
     hardhat: {
       accounts: {

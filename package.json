@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.2.0",
+    "eth-crypto": "^2.7.0",
     "ipfs-http-client": "^60.0.1"
   }
 }
