@@ -24,10 +24,12 @@ interface IKOLRegistry {
         );
     function pgpPublicKeys(address) external view returns (bytes memory);
     function pgpNonce(address) external view returns (uint256);
+    function isKOLActive(address) external view returns (bool);
 }
 
 error NotVerifiedKOL();
 error IncorrectFeeAmount();
+error KOLNotActive();
 error MessageNotPending();
 error NotAuthorizedKOL();
 error MessageDeadlinePassed();
@@ -127,6 +129,7 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
     event ActivePairAdded(address indexed sender, address indexed kol);
     event ActivePairRemoved(address indexed sender, address indexed kol);
     event TimeoutRefundPercentUpdated(uint256 oldPercent, uint256 newPercent);
+    event KOLRegistryUpdated(address indexed oldKOLRegistry, address indexed newKOLRegistry);
 
     constructor(address _kolRegistry, address _devAddress) Ownable(msg.sender) {
         if (_kolRegistry == address(0)) revert InvalidKOLRegistryAddress();
@@ -137,6 +140,13 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
     }
 
     receive() external payable {}
+
+    function setKOLRegistry(address _kolRegistry) external onlyOwner {
+        if (_kolRegistry == address(0)) revert InvalidKOLRegistryAddress();
+        address oldKOLRegistry = address(kolRegistry);
+        kolRegistry = IKOLRegistry(_kolRegistry);
+        emit KOLRegistryUpdated(oldKOLRegistry, _kolRegistry);
+    }
 
     function setTimeoutRefundPercent(uint256 _percent) external onlyOwner {
         if (_percent > 100) revert InvalidRefundPercentage();
@@ -257,7 +267,8 @@ contract RabitaMessaging is ReentrancyGuard, Ownable {
         if (_kol == address(0)) revert InvalidAddress();
         if (_senderPGPPublicKey.length == 0) revert InvalidPGPKey();
         if (bytes(content).length == 0) revert EmptyContent();
-        
+        if (!kolRegistry.isKOLActive(_kol)) revert KOLNotActive();
+
         (, , , , uint256 fee, , , , bool verified, ) = kolRegistry.kolProfiles(_kol);
         if (!verified) revert NotVerifiedKOL();
         if (msg.value != fee) revert IncorrectFeeAmount();

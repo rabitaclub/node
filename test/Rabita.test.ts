@@ -167,6 +167,8 @@ describe("Rabita Protocol", function () {
     const timestamp = Math.floor(Date.now() / 1000);
     const domain = DEFAULT_DOMAIN_STRING;
     const expiresAt = FUTURE_TIMESTAMP;
+    const tags = "KOL,Influencer,Test"; // Default tags
+    const description = "Test KOL description"; // Default description
 
     // Create verifier signature
     const verifierSignature = await signVerifierMessage(
@@ -194,6 +196,9 @@ describe("Rabita Protocol", function () {
       verifierSignature  // verifier signature
     );
 
+    // Create a default PGP public key (empty for testing)
+    const pgpPublicKey = "0x";
+
     // Connect with the wallet and register
     const registryWithKOL = rabitaRegistry.connect(wallet);
     await registryWithKOL.registerKOL(
@@ -202,13 +207,16 @@ describe("Rabita Protocol", function () {
       name,               // _name
       ethers.parseUnits(fee, "ether"), // _fee
       profileIpfsHash,    // _profileIpfsHash
+      tags,               // _tags
+      description,        // _description
       salt,               // _salt
       nonce,              // _nonce
       timestamp,          // _timestamp
       domain,             // _domain
       expiresAt,          // _expiresAt
       verifierSignature,  // _verifierSignature
-      userSignature       // _userSignature
+      userSignature,      // _userSignature
+      pgpPublicKey        // _pgpPublicKey
     );
   }
 
@@ -241,6 +249,9 @@ describe("Rabita Protocol", function () {
         const salt = generateRandomSalt();
         const nonce = generateRandomNonce();
         const socialName = "Test KOL";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
         
         // Use wrong signer for verifier signature
         const verifierSignature = await signVerifierMessage(
@@ -274,13 +285,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifierSignature,
-            userSignature
+            userSignature,
+            pgpPublicKey
           )
         ).to.be.revertedWith("Invalid verifier signature");
       });
@@ -292,6 +306,9 @@ describe("Rabita Protocol", function () {
         const salt = generateRandomSalt();
         const nonce = generateRandomNonce();
         const socialName = "Test KOL";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
         
         // Get valid verifier signature
         const verifierSignature = await signVerifierMessage(
@@ -317,13 +334,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifierSignature,
-            malformedSignature
+            malformedSignature,
+            pgpPublicKey
           )
         ).to.be.reverted; // Changed from .to.be.revertedWith("Invalid user signature")
       });
@@ -331,6 +351,10 @@ describe("Rabita Protocol", function () {
       it("should prevent registration with expired timestamp", async function () {
         const profileIpfsHash = "QmTest";
         const socialName = "Test KOL";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
+        
         // Use an explicitly expired timestamp
         const currentTimestamp = Math.floor(Date.now() / 1000);
         const expiryTimestamp = currentTimestamp - 3600; // 1 hour in the past
@@ -368,13 +392,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifierSignature,
-            userSignature
+            userSignature,
+            pgpPublicKey
           )
         ).to.be.revertedWith("Verification expired");
       });
@@ -410,6 +437,9 @@ describe("Rabita Protocol", function () {
         const salt = generateRandomSalt();
         const nonce = generateRandomNonce();
         const socialName = "Test KOL";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
         
         // Get valid signatures
         const verifierSignature = await signVerifierMessage(
@@ -443,13 +473,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifierSignature,
-            userSignature
+            userSignature,
+            pgpPublicKey
           )
         )
           .to.emit(rabitaRegistry, "KOLRegistered")
@@ -464,6 +497,9 @@ describe("Rabita Protocol", function () {
         const nonce = generateRandomNonce(); // Same nonce
         const socialName = "Test KOL";
         const username = "nonce_reuse_test";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
         
         // Register first KOL
         const verifier1Signature = await signVerifierMessage(
@@ -497,13 +533,16 @@ describe("Rabita Protocol", function () {
           socialName,
           DEFAULT_FEE.toString(),
           profileIpfsHash,
+          tags,
+          description,
           salt,
           nonce,
           currentTimestamp,
           DEFAULT_DOMAIN_STRING,
           expiryTimestamp,
           verifier1Signature,
-          user1Signature
+          user1Signature,
+          pgpPublicKey
         );
 
         // Try to register again with the SAME user, username, nonce and timestamp
@@ -542,13 +581,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifier2Signature,
-            user2Signature
+            user2Signature,
+            pgpPublicKey
           )
         ).to.be.reverted; // Custom error or "Nonce already used"
       });
@@ -560,6 +602,9 @@ describe("Rabita Protocol", function () {
         const salt = generateRandomSalt();
         const nonce = generateRandomNonce();
         const socialName = "Test KOL";
+        const tags = "KOL,Influencer,Test"; // Default tags
+        const description = "Test KOL description"; // Default description
+        const pgpPublicKey = "0x"; // Default empty PGP key
         
         // Get address of "other"
         const otherAddress = other.address;
@@ -600,13 +645,16 @@ describe("Rabita Protocol", function () {
             socialName,
             DEFAULT_FEE.toString(),
             profileIpfsHash,
+            tags,
+            description,
             salt,
             nonce,
             currentTimestamp,
             DEFAULT_DOMAIN_STRING,
             expiryTimestamp,
             verifierSignature,
-            userSignature
+            userSignature,
+            pgpPublicKey
           )
         ).to.be.revertedWith("Social handle already registered");
       });
@@ -639,6 +687,203 @@ describe("Rabita Protocol", function () {
         // Then remove it
         await rabitaRegistry.connect(deployer).removeVerifier(other.address);
         expect(await rabitaRegistry.isVerifier(other.address)).to.be.false;
+      });
+    });
+
+    describe("KOL Availability Management", function () {
+      beforeEach(async function () {
+        // Register a KOL before each test
+        await registerKOL(kol, "Twitter", "availability_test", "Availability KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+      });
+
+      it("should update KOL active days", async function () {
+        // Since all days are active by default, we'll first deactivate all days
+        for (let i = 0; i < 7; i++) {
+          await rabitaRegistry.connect(kol).updateKOLActiveDays([i], [false]);
+        }
+        
+        // Verify all days are now inactive
+        for (let i = 0; i < 7; i++) {
+          expect(await rabitaRegistry.kolActiveDays(kol.address, i)).to.be.false;
+        }
+        
+        // Define active days (Monday and Friday)
+        const activeDays = [0, 4]; // Monday (0) and Friday (4)
+        const activeStatus = [true, true];
+        
+        // Update active days
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(activeDays, activeStatus);
+        
+        // Verify the days are active
+        expect(await rabitaRegistry.kolActiveDays(kol.address, 0)).to.be.true; // Monday
+        expect(await rabitaRegistry.kolActiveDays(kol.address, 4)).to.be.true; // Friday
+        // Verify other days are not active
+        expect(await rabitaRegistry.kolActiveDays(kol.address, 1)).to.be.false; // Tuesday
+      });
+
+      it("should update KOL active time", async function () {
+        // Set active time from 8:00am to 8:00pm (in seconds since midnight)
+        const startTime = 8 * 60 * 60; // 8:00am in seconds
+        const endTime = 20 * 60 * 60; // 8:00pm in seconds
+        
+        await rabitaRegistry.connect(kol).updateKOLActiveTime(startTime, endTime);
+        
+        // Verify the times are set correctly
+        expect(await rabitaRegistry.kolActiveTime(kol.address)).to.equal(startTime);
+        expect(await rabitaRegistry.kolInactiveTime(kol.address)).to.equal(endTime);
+      });
+
+      it("should check if KOL is active based on current time", async function () {
+        // Get the current day of the week based on current timestamp
+        // Since we can't control the actual day in tests, we'll set the current day as active
+        const getDayAndTime = await rabitaRegistry.getDayAndTimeUsingTimestamp();
+        const currentDay = Number(getDayAndTime[0]);
+        
+        // Set the current day as active
+        const activeDays = [currentDay];
+        const activeStatus = [true];
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(activeDays, activeStatus);
+        
+        // Set the active time to include the current time
+        const currentTime = Number(getDayAndTime[1]);
+        // Set a window of 2 hours around the current time
+        const startTime = Math.max(0, currentTime - 3600); // 1 hour before current time
+        const endTime = Math.min(86399, currentTime + 3600); // 1 hour after current time
+        
+        await rabitaRegistry.connect(kol).updateKOLActiveTime(startTime, endTime);
+        
+        // KOL should be active now
+        expect(await rabitaRegistry.isKOLActive(kol.address)).to.be.true;
+      });
+
+      it("should return false if KOL is not active on current day", async function () {
+        // Since all days are active by default, we'll first deactivate all days
+        // for (let i = 0; i < 7; i++) {
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(
+          Array.from({ length: 7 }, (_, i) => i),
+          Array.from({ length: 7 }, () => false)
+        );
+        // }
+        
+        // Get the current day of the week
+        const getDayAndTime = await rabitaRegistry.getDayAndTimeUsingTimestamp();
+        const currentDay = Number(getDayAndTime[0]);
+        
+        // Set a different day than the current day as active
+        const inactiveDay = (currentDay + 1) % 7; // Next day
+        const activeDays = [inactiveDay];
+        const activeStatus = [true];
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(activeDays, activeStatus);
+        
+        // Set full day active time range
+        await rabitaRegistry.connect(kol).updateKOLActiveTime(0, 86399);
+        
+        // KOL should not be active because day doesn't match
+        expect(await rabitaRegistry.isKOLActive(kol.address)).to.be.false;
+      });
+
+      it("should return false if KOL is active on current day but outside active time", async function () {
+        // Get the current day and time
+        const getDayAndTime = await rabitaRegistry.getDayAndTimeUsingTimestamp();
+        const currentDay = Number(getDayAndTime[0]);
+        const currentTime = Number(getDayAndTime[1]);
+        
+        // Set the current day as active
+        const activeDays = [currentDay];
+        const activeStatus = [true];
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(activeDays, activeStatus);
+        
+        // Set active time to be a window that doesn't include the current time
+        // If current time is in the first half of the day, set active time to be in the second half
+        // If current time is in the second half, set active time to be in the first half
+        let startTime, endTime;
+        
+        if (currentTime < 43200) { // First half of day (before noon)
+          startTime = 43200; // Noon
+          endTime = 86399; // 11:59:59 PM
+        } else { // Second half of day (after noon)
+          startTime = 0; // Midnight
+          endTime = 43200; // Noon
+        }
+        
+        await rabitaRegistry.connect(kol).updateKOLActiveTime(startTime, endTime);
+        
+        // KOL should not be active because time doesn't match
+        expect(await rabitaRegistry.isKOLActive(kol.address)).to.be.false;
+      });
+      
+      it("should correctly handle time ranges that cross midnight", async function () {
+        // Get the current day and time
+        const getDayAndTime = await rabitaRegistry.getDayAndTimeUsingTimestamp();
+        const currentDay = Number(getDayAndTime[0]);
+        const currentTime = Number(getDayAndTime[1]);
+        const nextDay = (currentDay + 1) % 7;
+        
+        // Set the current day and next day as active
+        const activeDays = [currentDay, nextDay];
+        const activeStatus = [true, true];
+        await rabitaRegistry.connect(kol).updateKOLActiveDays(activeDays, activeStatus);
+        
+        // Set a time range that crosses midnight
+        // If current time is before 10pm, we'll test with 10pm-2am window
+        // If current time is after 10pm, we'll test with a 10pm-2am window but expect active
+        const startTime = 22 * 3600; // 10pm
+        const endTime = 2 * 3600; // 2am
+        
+        await rabitaRegistry.connect(kol).updateKOLActiveTime(startTime, endTime);
+        
+        // Check if current time is within the range
+        const isInRange = currentTime >= startTime || currentTime < endTime;
+        
+        // KOL should be active if current time is within the range
+        expect(await rabitaRegistry.isKOLActive(kol.address)).to.equal(isInRange);
+      });
+      
+      it("should reject KOL availability check for unregistered address", async function () {
+        await expect(
+          rabitaRegistry.isKOLActive(other.address)
+        ).to.be.revertedWith("KOL not registered");
+      });
+      
+      it("should set default availability (24/7) for newly registered KOL", async function () {
+        // Register a fresh KOL for this test to ensure clean state
+        const freshKol = other; // Using 'other' account as a fresh KOL
+        await registerKOL(freshKol, "Twitter", "default_availability_test", "Default Availability KOL", DEFAULT_FEE.toString(), "QmTest", verificationSigner);
+        
+        // Verify all days are active by default
+        for (let i = 0; i < 7; i++) {
+          expect(await rabitaRegistry.kolActiveDays(freshKol.address, i)).to.be.true;
+        }
+        
+        // Verify default time slots are set to full day
+        expect(await rabitaRegistry.kolActiveTime(freshKol.address)).to.equal(0); // Midnight
+        expect(await rabitaRegistry.kolInactiveTime(freshKol.address)).to.equal(86399); // 23:59:59
+        
+        // Verify KOL is active at current time without any manual setup
+        expect(await rabitaRegistry.isKOLActive(freshKol.address)).to.be.true;
+        
+        // Test KOL is inactive if we change time range to exclude current time
+        // Get current time of day
+        const getDayAndTime = await rabitaRegistry.getDayAndTimeUsingTimestamp();
+        const currentTime = Number(getDayAndTime[1]);
+        
+        // Split the day in half and set the KOL to be active in the half that doesn't include current time
+        if (currentTime < 43200) { // If in first half of day
+          // Set active time to second half of day
+          await rabitaRegistry.connect(freshKol).updateKOLActiveTime(43200, 86399);
+        } else {
+          // Set active time to first half of day
+          await rabitaRegistry.connect(freshKol).updateKOLActiveTime(0, 43199);
+        }
+        
+        // With this time range that excludes current time, KOL should be inactive
+        expect(await rabitaRegistry.isKOLActive(freshKol.address)).to.be.false;
+        
+        // Restore full day availability
+        await rabitaRegistry.connect(freshKol).updateKOLActiveTime(0, 86399);
+        
+        // KOL should be active again
+        expect(await rabitaRegistry.isKOLActive(freshKol.address)).to.be.true;
       });
     });
   });

@@ -22,6 +22,7 @@ const config: HardhatUserConfig = {
     bsc: {
       url: process.env.BSC_URL,
       accounts: [process.env.BSC_KEY || ""],
+      gasPrice: 3_000_000_000,
     },
     testnet: {
       url: process.env.TEST_URL,
@@ -47,8 +48,10 @@ const config: HardhatUserConfig = {
     base: {
       url: process.env.BASE_URL,
       accounts: [process.env.BASE_KEY || ""],
-    }
-    
+    }    
+  },
+  etherscan: {
+    apiKey: process.env.ETHERSCAN_API_KEY,
   },
 };
 

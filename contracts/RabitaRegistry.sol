@@ -14,6 +14,16 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
+
+    enum DAYS {
+        MONDAY,
+        TUESDAY,
+        WEDNESDAY,
+        THURSDAY,
+        FRIDAY,
+        SATURDAY,
+        SUNDAY
+    }
     struct KOLProfile {
         address wallet;
         string socialPlatform;
@@ -28,6 +38,10 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
     }
 
     mapping(address => KOLProfile) public kolProfiles;
+    mapping(address => mapping(DAYS => bool)) public kolActiveDays;
+    mapping(address => uint256) public kolActiveTime;
+    mapping(address => uint256) public kolInactiveTime;
+
     mapping(string => mapping(string => KOLProfile)) public socialHandleToKOLProfile;
     mapping(bytes32 => bool) public usedNonces;
     mapping(address => bool) public isVerifier;
@@ -66,6 +80,11 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
     );
     event PGPKeyUpdated(address indexed wallet, bytes pgpPublicKey, uint pgpNonce);
     event KOLFeeUpdated(address indexed wallet, uint256 fee);
+
+    event KOLActiveDaysUpdated(address indexed wallet, DAYS day, bool active);
+    event KOLActiveTimeUpdated(address indexed wallet, uint256 startTime, uint256 endTime);
+    event KOLInactiveTimeUpdated(address indexed wallet, uint256 startTime, uint256 endTime);
+
     event VerifierAdded(address indexed verifier);
     event VerifierRemoved(address indexed verifier);
     event KOLUnregistered(address indexed wallet);
@@ -233,10 +252,26 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         pgpNonce[msg.sender]++;
         
         socialHandleToKOLProfile[_platform][_username] = kolProfiles[msg.sender];
+        setAllActiveDays();
+        setDefaultTimeSlot();
         
         emit KOLRegistered(msg.sender, _platform, _username, _name, _fee);
         emit PGPKeyUpdated(msg.sender, _pgpPublicKey, pgpNonce[msg.sender]);
         emit KOLData(msg.sender, _profileIpfsHash, _tags, _description);
+    }
+
+    function setAllActiveDays() internal {
+        for (uint256 i = 0; i < 7; i++) {
+            kolActiveDays[msg.sender][DAYS(i)] = true;
+            emit KOLActiveDaysUpdated(msg.sender, DAYS(i), true);
+        }
+    }
+
+    function setDefaultTimeSlot() internal {
+        kolActiveTime[msg.sender] = 0;
+        kolInactiveTime[msg.sender] = 86399;
+        emit KOLActiveTimeUpdated(msg.sender, 0, 86399);
+        emit KOLInactiveTimeUpdated(msg.sender, 0, 86399);
     }
 
     function isSocialHandleRegistered(string memory _platform, string memory _handle) external view returns (bool) {
@@ -279,6 +314,57 @@ contract RabitaRegistry is Ownable, EIP712, ReentrancyGuard {
         require(_fee > 0, "Fee must be greater than 0");
         kolProfiles[msg.sender].fee = _fee;
         emit KOLFeeUpdated(msg.sender, _fee);
+    }
+
+    function updateKOLActiveDays(DAYS[] memory _days, bool[] memory _active) external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
+        require(_days.length == _active.length, "Days and active array must be the same length");
+        for (uint256 i = 0; i < _days.length; i++) {
+            kolActiveDays[msg.sender][_days[i]] = _active[i];
+            emit KOLActiveDaysUpdated(msg.sender, _days[i], _active[i]);
+        }
+    }
+
+    function updateKOLActiveTime(uint256 _startTime, uint256 _endTime) external nonReentrant {
+        require(kolProfiles[msg.sender].verified, "KOL not registered");
+        kolActiveTime[msg.sender] = _startTime;
+        kolInactiveTime[msg.sender] = _endTime;
+        emit KOLActiveTimeUpdated(msg.sender, _startTime, _endTime);
+        emit KOLInactiveTimeUpdated(msg.sender, _startTime, _endTime);
+    }
+
+    function getDayAndTimeUsingTimestamp() external view returns (DAYS, uint256) {
+        uint256 currentTime = block.timestamp;
+        
+        uint256 daysSinceEpoch = currentTime / 86400;
+        uint256 dayOfWeek = ((daysSinceEpoch + 3) % 7);
+        
+        uint256 timeOfDay = currentTime % 86400;
+
+        return (DAYS(dayOfWeek), timeOfDay);
+    }
+
+    function isKOLActive(address _wallet) external view returns (bool) {
+        require(kolProfiles[_wallet].verified, "KOL not registered");
+        uint256 currentTime = block.timestamp;
+        uint256 daysSinceEpoch = currentTime / 86400;
+        uint256 dayOfWeek = ((daysSinceEpoch + 3) % 7);
+        DAYS currentDay = DAYS(dayOfWeek);
+        if (!kolActiveDays[_wallet][currentDay]) {
+            return false;
+        }
+        uint256 timeOfDay = currentTime % 86400;
+        uint256 activeStart = kolActiveTime[_wallet];
+        uint256 activeEnd = kolInactiveTime[_wallet];
+        
+        activeStart = activeStart % 86400;
+        activeEnd = activeEnd % 86400;
+        
+        if (activeStart <= activeEnd) {
+            return (timeOfDay >= activeStart && timeOfDay < activeEnd);
+        } else {
+            return (timeOfDay >= activeStart || timeOfDay < activeEnd);
+        }
     }
 
     function updateKOLData(

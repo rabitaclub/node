@@ -17,7 +17,9 @@ async function main() {
   const RabitaApp = await hre.ethers.getContractFactory("RabitaRegistry")
   const MessagingService = await hre.ethers.getContractFactory("RabitaMessaging")
 
-  const rabitaRegistry = await RabitaApp.attach("0x3cB919f6585c6e18F313722965987604F70c1cBc");
+  const rabitaRegistry = await RabitaApp.deploy(verifierAddress);
+  // const rabitaRegistry = await RabitaApp.attach("0x3cB919f6585c6e18F313722965987604F70c1cBc");
+  // const messagingService = await MessagingService.attach("0x3cB919f6585c6e18F313722965987604F70c1cBc");
   const messagingService = await MessagingService.deploy(await rabitaRegistry.getAddress(), feeCollectorAddress);
 
   const rabitaRegistryAddress = await rabitaRegistry.getAddress();
